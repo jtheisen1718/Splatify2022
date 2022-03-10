@@ -5,7 +5,7 @@ In sample-server we have provided you with a very simple working web-service tha
 
 First start the server in a one terminal (note the export command may not be needed)
 ```
-cd server
+cd sample-server
 export FLASK_APP=app.py
 flask run
 ```
