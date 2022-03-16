@@ -1,0 +1,4 @@
+Everything is functional. I spent maybe 12-15 hours? I got hung up on some of the
+infrastructure stuff: opening the server, querying the server, figuring out where
+instructions were and where the files they referenced were. Beyond that I had no
+problems.

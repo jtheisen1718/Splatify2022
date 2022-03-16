@@ -1,4 +1,5 @@
 import logging
+logging.basicConfig(level = logging.DEBUG)
 import sqlite3
 from flask.cli import with_appcontext
 
@@ -71,6 +72,27 @@ class DB:
             self.conn.executescript(f.read())
         return "{\"message\":\"created\"}"
 
+    # Takes a list of 
+    def get_artist_sets(self, artists):
+        artist_set = set([])
+        for a in artists:
+            try:
+                if a['artist_id'] < 1:
+                    logging.error("Invalid artist ID")
+                    raise BadRequest("Invalid artist ID")
+                if a['artist_name'] == "":
+                    logging.error("Invalid artist name")
+                    raise BadRequest("Invalid artist name")
+            except KeyError as e:
+                logging.error("Missing artist ID or name")
+                raise BadRequest("Missing artist ID or name")
+            try:
+                country = a['country']
+            except KeyError as e:
+                country = ""
+            artist_set.add((a['artist_id'],str(a['artist_name']),country))
+        return artist_set
+
 
     # Add an album to the DB
     # An album has details, a list of artists, and a list of songs
@@ -79,7 +101,7 @@ class DB:
     # Songs sould be associated with the album, the order *does* matter and should be retained.
     def add_album(self, post_body):
         try:
-            logging.debug("Add Album with post %s" % post_body)
+            # logging.debug("Add Album with post %s" % post_body)
             album_id = post_body["album_id"]
             album_name = post_body["album_name"]
             release_year = post_body["release_year"]
@@ -94,11 +116,107 @@ class DB:
         if isinstance(songs, list) is False or isinstance(artists, list) is False:
             logging.error("song_ids or artist_ids are not lists")
             raise BadRequest("song_ids or artist_ids are not lists")
-        
+        if len(songs) < 1 or len(artists) < 1:
+            logging.error("song_ids or artist_ids are empty")
+            raise BadRequest("song_ids or artist_ids are empty")
+
+        # Album data construction
+        if album_id < 1:
+            logging.error("Invalid album ID")
+            raise BadRequest("Invalid album ID")
+        if release_year < 1900:
+            logging.error("Invalid Release Year")
+            raise BadRequest("Invalid Release Year")
         c = self.conn.cursor()
-        # TODO milestone splat
+        # If album id exists,
+        c.execute("SELECT EXISTS(SELECT album_id FROM Albums \
+            WHERE album_id = ?)",(album_id,))
+        if c.fetchone()[0]:
+            # Raise error
+            logging.error("This album ID already exists")
+            raise BadRequest("album ID already exists")
+
+        # Album artist data construction
+        album_artist_set = self.get_artist_sets(artists)
+
+        # Song data construction
+        song_set = set([])
+        song_artist_set = set([])
+        song_album_set = set([])
+        song_order = 1
+        for s in songs:
+            try:
+                if s['song_id'] < 1:
+                    logging.error("Invalid song ID")
+                    raise BadRequest("Invalid song ID")
+                if s['song_name'] == "":
+                    logging.error("Invalid song name")
+                    raise BadRequest("Invalid song name")
+                if s['length'] < 1:
+                    logging.error("Invalid song length")
+                    raise BadRequest("Invalid song length")
+                if len(s['artists']) < 1:
+                    logging.error("Invalid song artists")
+                    raise BadRequest("Invalid song artists")
+            except KeyError as e:
+                logging.error("Missing song information")
+                raise BadRequest("Missing song information")
+            
+            for a in self.get_artist_sets(s['artists']):
+                song_artist_set.add((s['song_id'],a))
+            song_set.add((s['song_id'],s['song_name'],s['length']))
+            song_album_set.add((s['song_id'],album_id,song_order))
+            song_order += 1
+
+        # Insert album
+        c.execute("INSERT INTO Albums (album_id,album_name,release_year) \
+            VALUES (?, ?, ?)",(album_id,album_name,release_year))
+        
+        for a in album_artist_set:
+            # If artist does not exist
+            c.execute("SELECT EXISTS(SELECT artist_id FROM Artists \
+                WHERE artist_id = ?)",(a[0],))
+            artist_inserted = c.fetchone()[0]
+            if not artist_inserted:
+                # Insert it
+                c.execute("INSERT INTO Artists (artist_id,artist_name,country) \
+                    VALUES (?,?,?)",a)
+
+            # ARTIST_ALBUM RELATIONSHIP
+            c.execute("INSERT or IGNORE INTO artist_album (artist_id,album_id) \
+                VALUES (?,?)",(a[0],album_id))
+
+        for s in song_set:
+            # If song does not exist
+            c.execute("SELECT EXISTS(SELECT song_id FROM Songs \
+                WHERE song_id = ?)",(s[0],))
+            song_inserted = c.fetchone()[0]
+            if not song_inserted:
+                # Insert it
+                c.execute("INSERT INTO Songs (song_id,song_name,length) \
+                    VALUES (?,?,?)",s)
+        
+        for sid,a in song_artist_set:
+            # If artist does not exist
+            c.execute("SELECT EXISTS(SELECT artist_id FROM Artists \
+                WHERE artist_id = ?)",(a[0],))
+            artist_inserted = c.fetchone()[0]
+            if not artist_inserted:
+                # Insert it
+                c.execute("INSERT INTO Artists (artist_id,artist_name,country) \
+                    VALUES (?,?,?)",a)
+            
+            # ARTIST_SONG RELATIONSHIP
+            c.execute("INSERT or IGNORE INTO artist_song (artist_id,song_id) \
+                VALUES (?,?)",(a[0],sid))
+
+        for row in song_album_set:
+            c.execute("INSERT INTO song_album (song_id,album_id,song_order) \
+                VALUES (?,?,?)",row)
+
+        self.conn.commit()
         # If your code successfully inserts the data
-        # return "{\"message\":\"album inserted\"}"
+        return "{\"message\":\"album inserted\"}"
 
 
 
@@ -108,22 +226,45 @@ class DB:
     """
     def find_song(self, song_id):
         c = self.conn.cursor()
-        # Your query should fetch (song_id, name, length, artist_name, album_name) based on song_id
-        # TODO milestone splat
-        res = to_json(c)
+        c.execute("SELECT * FROM Songs WHERE song_id = ?",(song_id,))
+        song_info = c.fetchall()
+        if len(song_info) < 1:
+            raise KeyNotFound()
+        else:
+            song_info = song_info[0]
+        
+        c.row_factory = lambda cursor, row: row[0]
+        c.execute("SELECT DISTINCT artist_id FROM artist_song WHERE song_id = ?", (song_id,))
+        artist_info = c.fetchall()
+        c.execute("SELECT DISTINCT album_id FROM song_album WHERE song_id = ?", (song_id,))
+        album_info = c.fetchall()
         self.conn.commit()
-        return res
+        return {
+            'song_id': song_info[0],
+            'song_name': song_info[1],
+            'length': song_info[2],
+            'artist_ids': artist_info,
+            'album_ids': album_info
+        }
 
     """
     Returns all an album's songs
     raise KeyNotFound() if album_id not found
     """
     def find_songs_by_album(self, album_id):
-
         c = self.conn.cursor()
-        # Your query should fetch (song_id, name, length, artist name, album name) based on album_id
-        # TODO milestone splat
+        c.execute("SELECT EXISTS(SELECT album_id FROM Albums WHERE album_id = ?)",(album_id,))
+        album_exists = c.fetchall()[0]
+        if not album_exists:
+            raise KeyNotFound()
+        
+        c.execute("SELECT song_id, song_name, length FROM song_album NATURAL JOIN Songs \
+            WHERE album_id = ? ORDER BY song_order", (album_id,))
         res = to_json(c)
+        c.row_factory = lambda cursor, row: row[0]
+        for song in res:
+            c.execute("SELECT DISTINCT artist_id FROM artist_song WHERE song_id = ?", (song['song_id'],))
+            song['artist_ids'] = c.fetchall()
         self.conn.commit()
         return res
 
@@ -133,9 +274,18 @@ class DB:
     """
     def find_songs_by_artist(self, artist_id):
         c = self.conn.cursor()
-        # Your query should fetch (song_id, name, length, artist name, album name) based on artist_id
-        # TODO milestone splat
+        c.execute("SELECT EXISTS(SELECT artist_id FROM Artists WHERE artist_id = ?)",(artist_id,))
+        artist_exists = c.fetchall()[0]
+        if not artist_exists:
+            raise KeyNotFound()
+        
+        c.execute("SELECT song_id, song_name, length FROM artist_song NATURAL JOIN Songs \
+            WHERE artist_id = ? ORDER BY song_id", (artist_id,))
         res = to_json(c)
+        c.row_factory = lambda cursor, row: row[0]
+        for song in res:
+            c.execute("SELECT DISTINCT artist_id FROM artist_song WHERE song_id = ? ORDER BY artist_id", (song['song_id'],))
+            song['artist_ids'] = c.fetchall()
         self.conn.commit()
         return res
    
@@ -145,11 +295,26 @@ class DB:
     """
     def find_album(self, album_id):
         c = self.conn.cursor()
-        # Your query should fetch (album_id, album_name, release_year) by album id
-        # TODO milestone splat
-        res = to_json(c)
+        c.execute("SELECT * FROM Albums WHERE album_id = ?",(album_id,))
+        album_info = c.fetchall()
+        if len(album_info) < 1:
+            raise KeyNotFound()
+        else:
+            album_info = album_info[0]
+        
+        c.row_factory = lambda cursor, row: row[0]
+        c.execute("SELECT DISTINCT artist_id FROM artist_album WHERE album_id = ?", (album_id,))
+        artist_info = c.fetchall()
+        c.execute("SELECT DISTINCT song_id FROM song_album WHERE album_id = ? ORDER BY song_order", (album_id,))
+        song_info = c.fetchall()
         self.conn.commit()
-        return res
+        return {
+            "album_id": album_info[0],
+            "album_name": album_info[1],
+            "release_year": album_info[2],
+            "artist_ids": artist_info,
+            "song_ids": song_info
+        }
 
     """
     Returns a album's info
@@ -158,8 +323,12 @@ class DB:
     """
     def find_album_by_artist(self, artist_id):
         c = self.conn.cursor()
-        # Your query should fetch (album_id, album_name, release_year) by artist_id
-        # TODO milestone splat
+        c.execute("SELECT EXISTS(SELECT artist_id FROM Artists WHERE artist_id = ?)",(artist_id,))
+        artist_exists = c.fetchall()[0]
+        if not artist_exists:
+            raise KeyNotFound()
+        c.execute("SELECT album_id, album_name, release_year \
+            FROM Albums NATURAL JOIN artist_album WHERE artist_id = ?",(artist_id,))
         res = to_json(c)
         self.conn.commit()
         return res
@@ -170,8 +339,11 @@ class DB:
     """
     def find_artist(self, artist_id):
         c = self.conn.cursor()
-        # Your query should fetch (artist_id, artist_name, country) by artist id
-        # TODO milestone splat
+        c.execute("SELECT EXISTS(SELECT artist_id FROM Artists WHERE artist_id = ?)",(artist_id,))
+        artist_exists = c.fetchall()[0]
+        if not artist_exists:
+            raise KeyNotFound()
+        c.execute("SELECT * FROM Artists WHERE artist_id = ?",(artist_id,))
         res = to_json(c)
         self.conn.commit()
         return res
@@ -181,9 +353,15 @@ class DB:
     raise KeyNotFound() if artist_id is not found 
     """
     def avg_song_length(self, artist_id):
+        
         c = self.conn.cursor()
-        # Your query should fetch (artist_id, avg_length) by artist_id
-        # TODO milestone splat
+        c.execute("SELECT EXISTS(SELECT artist_id FROM Artists WHERE artist_id = ?)",(artist_id,))
+        artist_exists = c.fetchall()[0]
+        if not artist_exists:
+            raise KeyNotFound()
+        
+        c.execute("SELECT ROUND(AVG(length),1) as avg_length, artist_id \
+            FROM Songs NATURAL JOIN artist_song WHERE artist_id = ?",(artist_id,))
         res = to_json(c)
         self.conn.commit()
         return res
@@ -194,7 +372,9 @@ class DB:
     """
     def top_length(self, num_artists):
         c = self.conn.cursor()
-        # TODO milestone splat
+        c.execute("SELECT artist_id, SUM(length) as total_length \
+            FROM Songs NATURAL JOIN artist_song WHERE artist_id = ? \
+                ORDER BY total_length LIMIT ?",(num_artists,))
         res = to_json(c)
         self.conn.commit()
         return res
