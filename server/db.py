@@ -373,8 +373,8 @@ class DB:
     def top_length(self, num_artists):
         c = self.conn.cursor()
         c.execute("SELECT artist_id, SUM(length) as total_length \
-            FROM Songs NATURAL JOIN artist_song WHERE artist_id = ? \
-                ORDER BY total_length LIMIT ?",(num_artists,))
+            FROM Songs NATURAL JOIN artist_song GROUP BY artist_id \
+                ORDER BY total_length DESC LIMIT ?",(num_artists,))
         res = to_json(c)
         self.conn.commit()
         return res
